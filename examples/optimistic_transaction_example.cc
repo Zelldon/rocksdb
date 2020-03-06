@@ -5,176 +5,103 @@
 
 #ifndef ROCKSDB_LITE
 
+#include <iostream>
 #include "rocksdb/db.h"
 #include "rocksdb/options.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
+#include "rocksdb/table.h"
 
 using namespace ROCKSDB_NAMESPACE;
 
 std::string kDBPath = "/tmp/rocksdb_transaction_example";
 
 int main() {
-  // open DB
-  Options options;
-  options.create_if_missing = true;
-  DB* db;
-  OptimisticTransactionDB* txn_db;
+    // open DB
+    BlockBasedTableOptions table_options;
+    table_options.block_cache = NewLRUCache(1 * 1024 * 1024 * 1024L);
 
-  Status s = OptimisticTransactionDB::Open(options, kDBPath, &txn_db);
-  assert(s.ok());
-  db = txn_db->GetBaseDB();
+    DBOptions options;
+    options.create_if_missing = true;
+    options.create_missing_column_families = true;
+    //    options.create_if_missing = true;
+//    options.table_factory.reset(NewBlockBasedTableFactory(table_options));
 
-  WriteOptions write_options;
-  ReadOptions read_options;
-  OptimisticTransactionOptions txn_options;
-  std::string value;
+    DB *db;
+    OptimisticTransactionDB *txn_db;
 
-  ////////////////////////////////////////////////////////
-  //
-  // Simple OptimisticTransaction Example ("Read Committed")
-  //
-  ////////////////////////////////////////////////////////
 
-  // Start a transaction
-  Transaction* txn = txn_db->BeginTransaction(write_options);
-  assert(txn);
+    const int columnFamilyCount = 100;
 
-  // Read a key in this transaction
-  s = txn->Get(read_options, "abc", &value);
-  assert(s.IsNotFound());
+    std::vector<ColumnFamilyDescriptor> column_families;
+    // have to open default column family
+    column_families.push_back(ColumnFamilyDescriptor(
+            kDefaultColumnFamilyName, ColumnFamilyOptions()));
+    for (int idx = 0; idx < columnFamilyCount; ++idx) {
 
-  // Write a key in this transaction
-  s = txn->Put("abc", "xyz");
-  assert(s.ok());
+        std::string name = "cf_" + std::to_string(idx);
 
-  // Read a key OUTSIDE this transaction. Does not affect txn.
-  s = db->Get(read_options, "abc", &value);
-  assert(s.IsNotFound());
+        std::cout << name << std::endl;
+        // open the new one, too
+        column_families.push_back(ColumnFamilyDescriptor(
+                name, ColumnFamilyOptions()));
+    }
 
-  // Write a key OUTSIDE of this transaction.
-  // Does not affect txn since this is an unrelated key.  If we wrote key 'abc'
-  // here, the transaction would fail to commit.
-  s = db->Put(write_options, "xyz", "zzz");
-  assert(s.ok());
-  s = db->Put(write_options, "abc", "def");
-  assert(s.ok());
+    std::vector<ColumnFamilyHandle*> handles;
+    Status s = OptimisticTransactionDB::Open(options, kDBPath, column_families, &handles, &txn_db);
 
-  // Commit transaction
-  s = txn->Commit();
-  assert(s.IsBusy());
-  delete txn;
+//    std::cout << s.code() << " " << s.getState() << std::endl;
+    assert(s.ok());
+    db = txn_db->GetBaseDB();
 
-  s = db->Get(read_options, "xyz", &value);
-  assert(s.ok());
-  assert(value == "zzz");
+    WriteOptions write_options;
+    ReadOptions read_options;
+    OptimisticTransactionOptions txn_options;
+    std::string value;
 
-  s = db->Get(read_options, "abc", &value);
-  assert(s.ok());
-  assert(value == "def");
 
-  ////////////////////////////////////////////////////////
-  //
-  // "Repeatable Read" (Snapshot Isolation) Example
-  //   -- Using a single Snapshot
-  //
-  ////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////
+    //
+    // Simple OptimisticTransaction Example ("Read Committed")
+    //
+    ////////////////////////////////////////////////////////
 
-  // Set a snapshot at start of transaction by setting set_snapshot=true
-  txn_options.set_snapshot = true;
-  txn = txn_db->BeginTransaction(write_options, txn_options);
+    const int transactionCount = 100000;
+    for (int i = 0; i < transactionCount; ++i) {
 
-  const Snapshot* snapshot = txn->GetSnapshot();
+        // Start a transaction
+        Transaction *txn = txn_db->BeginTransaction(write_options);
+        assert(txn);
 
-  // Write a key OUTSIDE of transaction
-  s = db->Put(write_options, "abc", "xyz");
-  assert(s.ok());
+        // Write a key in this transaction
 
-  // Read a key using the snapshot
-  read_options.snapshot = snapshot;
-  s = txn->GetForUpdate(read_options, "abc", &value);
-  assert(s.ok());
-  assert(value == "def");
+        ColumnFamilyHandle *&family = handles.at(i % handles.size());
+        s = txn->Put(family, "abc", std::string(1024 * 1024, 'a'));
+        assert(s.ok());
 
-  // Attempt to commit transaction
-  s = txn->Commit();
+        std::cout << "Iter: " << i;
+        std::cout << " column family: " << family->GetName() << " used block cache: " << table_options.block_cache->GetUsage();
 
-  // Transaction could not commit since the write outside of the txn conflicted
-  // with the read!
-  assert(s.IsBusy());
+        std::string out;
+        db->GetProperty("rocksdb.estimate-table-readers-mem", &out);
+        std::cout << "estimated table readers mem: " << out;
 
-  delete txn;
-  // Clear snapshot from read options since it is no longer valid
-  read_options.snapshot = nullptr;
-  snapshot = nullptr;
+        db->GetProperty("rocksdb.cur-size-all-mem-tables", &out);
+        std::cout << "cur size all mem tables: " << out << std::endl;
 
-  s = db->Get(read_options, "abc", &value);
-  assert(s.ok());
-  assert(value == "xyz");
+        // Commit transaction
+        s = txn->Commit();
+        delete txn;
+    }
 
-  ////////////////////////////////////////////////////////
-  //
-  // "Read Committed" (Monotonic Atomic Views) Example
-  //   --Using multiple Snapshots
-  //
-  ////////////////////////////////////////////////////////
+    std::cout << "Out side the transaction used: " << table_options.block_cache->GetUsage() << std::endl;
 
-  // In this example, we set the snapshot multiple times.  This is probably
-  // only necessary if you have very strict isolation requirements to
-  // implement.
 
-  // Set a snapshot at start of transaction
-  txn_options.set_snapshot = true;
-  txn = txn_db->BeginTransaction(write_options, txn_options);
-
-  // Do some reads and writes to key "x"
-  read_options.snapshot = db->GetSnapshot();
-  s = txn->Get(read_options, "x", &value);
-  assert(s.IsNotFound());
-  s = txn->Put("x", "x");
-  assert(s.ok());
-
-  // The transaction hasn't committed, so the write is not visible
-  // outside of txn.
-  s = db->Get(read_options, "x", &value);
-  assert(s.IsNotFound());
-
-  // Do a write outside of the transaction to key "y"
-  s = db->Put(write_options, "y", "z");
-  assert(s.ok());
-
-  // Set a new snapshot in the transaction
-  txn->SetSnapshot();
-  read_options.snapshot = db->GetSnapshot();
-
-  // Do some reads and writes to key "y"
-  s = txn->GetForUpdate(read_options, "y", &value);
-  assert(s.ok());
-  assert(value == "z");
-  txn->Put("y", "y");
-
-  // Commit.  Since the snapshot was advanced, the write done outside of the
-  // transaction does not prevent this transaction from Committing.
-  s = txn->Commit();
-  assert(s.ok());
-  delete txn;
-  // Clear snapshot from read options since it is no longer valid
-  read_options.snapshot = nullptr;
-
-  // txn is committed, read the latest values.
-  s = db->Get(read_options, "x", &value);
-  assert(s.ok());
-  assert(value == "x");
-
-  s = db->Get(read_options, "y", &value);
-  assert(s.ok());
-  assert(value == "y");
-
-  // Cleanup
-  delete txn_db;
-  DestroyDB(kDBPath, options);
-  return 0;
+    // Cleanup
+//  delete txn_db;
+//  DestroyDB(kDBPath, options);
+    return 0;
 }
 
 #endif  // ROCKSDB_LITE
