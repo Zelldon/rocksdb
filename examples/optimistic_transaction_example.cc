@@ -74,11 +74,12 @@ int main() {
 
         // Write a key in this transaction
         ColumnFamilyHandle *&family = handles.at(i % handles.size());
-        s = txn->Put(family, "abc", std::string(1024 * 1024, 'a'));
+        s = txn->Put(family, std::string(1024 * ( (i % 1024) + 1), 'a'), "abc");
         assert(s.ok());
 
         // Commit transaction
         s = txn->Commit();
+        assert(s.ok());
         delete txn;
     }
 
