@@ -24,6 +24,7 @@ int main() {
     DBOptions dbOptions;
     dbOptions.create_if_missing = true;
     dbOptions.create_missing_column_families = true;
+    dbOptions.db_write_buffer_size = 512 * 1024 * 1024;
 
     std::cout << "DBOptions: " << std::endl;
     std::cout << "\t" << "db_write_buffer_size: " << dbOptions.db_write_buffer_size << std::endl;
