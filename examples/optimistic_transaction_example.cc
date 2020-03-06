@@ -17,41 +17,35 @@ using namespace ROCKSDB_NAMESPACE;
 
 std::string kDBPath = "/tmp/rocksdb_transaction_example";
 
+void createColumnFamilies(const int columnFamilyCount, const ColumnFamilyOptions &columnFamilyOptions,
+                          std::vector<ColumnFamilyDescriptor> &column_families);
+
 int main() {
-    // open DB
-    BlockBasedTableOptions table_options;
-    table_options.block_cache = NewLRUCache(1 * 1024 * 1024 * 1024L);
+    DBOptions dbOptions;
+    dbOptions.create_if_missing = true;
+    dbOptions.create_missing_column_families = true;
 
-    DBOptions options;
-    options.create_if_missing = true;
-    options.create_missing_column_families = true;
-    //    options.create_if_missing = true;
-//    options.table_factory.reset(NewBlockBasedTableFactory(table_options));
-
-    DB *db;
-    OptimisticTransactionDB *txn_db;
+    std::cout << "DBOptions: " << std::endl;
+    std::cout << "\t" << "db_write_buffer_size: " << dbOptions.db_write_buffer_size << std::endl;
+    std::cout << "\t" << "max_open_files: " << dbOptions.max_open_files << std::endl;
+    std::cout << "\t" << "write_buffer_manager: " << dbOptions.write_buffer_manager << std::endl;
 
 
-    const int columnFamilyCount = 100;
+    const int columnFamilyCount = 50;
+    ColumnFamilyOptions columnFamilyOptions = ColumnFamilyOptions();
+
+    std::cout << "ColumnFamilyOptions: " << std::endl;
+    std::cout << "\t" << "write_buffer_size: " << columnFamilyOptions.write_buffer_size << std::endl;
+    std::cout << "\t" << "arena_block_size: " << columnFamilyOptions.arena_block_size << std::endl;
 
     std::vector<ColumnFamilyDescriptor> column_families;
-    // have to open default column family
-    column_families.push_back(ColumnFamilyDescriptor(
-            kDefaultColumnFamilyName, ColumnFamilyOptions()));
-    for (int idx = 0; idx < columnFamilyCount; ++idx) {
+    createColumnFamilies(columnFamilyCount, columnFamilyOptions, column_families);
 
-        std::string name = "cf_" + std::to_string(idx);
-
-        std::cout << name << std::endl;
-        // open the new one, too
-        column_families.push_back(ColumnFamilyDescriptor(
-                name, ColumnFamilyOptions()));
-    }
-
-    std::vector<ColumnFamilyHandle*> handles;
-    Status s = OptimisticTransactionDB::Open(options, kDBPath, column_families, &handles, &txn_db);
-
-//    std::cout << s.code() << " " << s.getState() << std::endl;
+    // open DB
+    std::vector<ColumnFamilyHandle *> handles;
+    DB *db;
+    OptimisticTransactionDB *txn_db;
+    Status s = OptimisticTransactionDB::Open(dbOptions, kDBPath, column_families, &handles, &txn_db);
     assert(s.ok());
     db = txn_db->GetBaseDB();
 
@@ -59,15 +53,19 @@ int main() {
     ReadOptions read_options;
     OptimisticTransactionOptions txn_options;
     std::string value;
-
-
     ////////////////////////////////////////////////////////
     //
-    // Simple OptimisticTransaction Example ("Read Committed")
+    // Benchmark
     //
     ////////////////////////////////////////////////////////
 
     const int transactionCount = 100000;
+
+    std::cout << "~ Start Benchmark ~" << std::endl;
+    std::cout << "Column family count: " << columnFamilyCount << std::endl;
+    std::cout << "Transaction count: " << transactionCount << std::endl;
+
+    const clock_t startTime = clock();
     for (int i = 0; i < transactionCount; ++i) {
 
         // Start a transaction
@@ -75,33 +73,38 @@ int main() {
         assert(txn);
 
         // Write a key in this transaction
-
         ColumnFamilyHandle *&family = handles.at(i % handles.size());
         s = txn->Put(family, "abc", std::string(1024 * 1024, 'a'));
         assert(s.ok());
-
-        std::cout << "Iter: " << i;
-        std::cout << " column family: " << family->GetName() << " used block cache: " << table_options.block_cache->GetUsage();
-
-        std::string out;
-        db->GetProperty("rocksdb.estimate-table-readers-mem", &out);
-        std::cout << "estimated table readers mem: " << out;
-
-        db->GetProperty("rocksdb.cur-size-all-mem-tables", &out);
-        std::cout << "cur size all mem tables: " << out << std::endl;
 
         // Commit transaction
         s = txn->Commit();
         delete txn;
     }
 
-    std::cout << "Out side the transaction used: " << table_options.block_cache->GetUsage() << std::endl;
 
+    const clock_t endTime = clock();
+
+    std::cout << "~ Finished OptimisticDB benchmark ~" << std::endl;
+    std::cout << " Benchmark took: " << double(endTime - startTime) / CLOCKS_PER_SEC << " sec" << std::endl;
 
     // Cleanup
-//  delete txn_db;
-//  DestroyDB(kDBPath, options);
+    delete txn_db;
+    DestroyDB(kDBPath, Options(), column_families);
     return 0;
+}
+
+void createColumnFamilies(const int columnFamilyCount, const ColumnFamilyOptions &columnFamilyOptions,
+                          std::vector<ColumnFamilyDescriptor> &column_families) {// have to open default column family
+    column_families.push_back(ColumnFamilyDescriptor(
+            kDefaultColumnFamilyName, columnFamilyOptions));
+
+    for (int idx = 0; idx < columnFamilyCount; ++idx) {
+        std::string name = "cf_" + std::to_string(idx);
+        // open the new one, too
+        column_families.push_back(ColumnFamilyDescriptor(
+                name, columnFamilyOptions));
+    }
 }
 
 #endif  // ROCKSDB_LITE
