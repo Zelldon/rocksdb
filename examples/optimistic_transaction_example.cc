@@ -32,8 +32,17 @@ int main() {
     std::cout << "\t" << "write_buffer_manager: " << dbOptions.write_buffer_manager << std::endl;
 
 
+    BlockBasedTableOptions basedTableOptions = BlockBasedTableOptions();
+    basedTableOptions.block_size = 32 * 1024;
+
+    auto cache = NewLRUCache(512 * 1024 * 1024);
+    basedTableOptions.block_cache = cache;
+    basedTableOptions.cache_index_and_filter_blocks = true;
+
     const int columnFamilyCount = 50;
     ColumnFamilyOptions columnFamilyOptions = ColumnFamilyOptions();
+    columnFamilyOptions.optimize_filters_for_hits = true;
+    columnFamilyOptions.table_factory.reset(NewBlockBasedTableFactory(basedTableOptions));
 
     std::cout << "ColumnFamilyOptions: " << std::endl;
     std::cout << "\t" << "write_buffer_size: " << columnFamilyOptions.write_buffer_size << std::endl;
