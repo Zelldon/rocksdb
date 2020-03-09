@@ -30,6 +30,13 @@ void runTransaction(OptimisticTransactionDB* txn_db,
                     std::vector<ColumnFamilyHandle *> handles,
                     int i);
 
+
+void writeBatch(DB* db,
+                clock_t& iterationTime,
+                std::string& key,
+                std::vector<ColumnFamilyHandle *> handles,
+                int i);
+
 int main() {
 
     DBOptions dbOptions;
@@ -39,12 +46,24 @@ int main() {
     // enable statistics
     dbOptions.statistics = CreateDBStatistics();
     dbOptions.dump_malloc_stats = true;
+//    dbOptions.max_total_wal_size = (2 * 1024  * 1024 * 1023) + 1023;
 
     // mem table
-    dbOptions.db_write_buffer_size = (1 * 1024  * 1024 * 1023) + 1023;
-    WriteBufferManager* manager = new WriteBufferManager(dbOptions.db_write_buffer_size);
-    dbOptions.write_buffer_manager.reset(manager);
 
+    const double writeBufferRatio = 0.5;
+    const uint64_t totalSize = (uint64_t) (4 * 1024 * 1024) * 1024;
+    const double highRatio = 0.1;
+
+    const double cacheSize = ((3 - writeBufferRatio) * totalSize) / 3.0f;
+    const double writeBufferSize = 2 * totalSize * writeBufferRatio / 3.0f;
+
+//    dbOptions.db_write_buffer_size = (1 * 1024  * 1024 * 1023) + 1023;
+
+
+    std::cout << "Cache size: " << cacheSize << " write buffer size: " << writeBufferSize << std::endl;
+    auto cache = NewLRUCache(cacheSize, -1, false, highRatio);
+    WriteBufferManager* manager = new WriteBufferManager(writeBufferSize, cache);
+    dbOptions.write_buffer_manager.reset(manager);
 
     // 64 mb def by one column took ~ 30 s
     // 128 mb def by one column took 15
@@ -60,11 +79,11 @@ int main() {
     ColumnFamilyOptions columnFamilyOptions = ColumnFamilyOptions();
 
     // maximum write buffers, before flushing to disk
-    columnFamilyOptions.max_write_buffer_number = 8;
+    columnFamilyOptions.max_write_buffer_number = 1;
     // memtable size per column family
     columnFamilyOptions.write_buffer_size = 32 * 1024 * 1024;
     // maximum maintained bytes, incl buffers which are already flushed
-    columnFamilyOptions.max_write_buffer_size_to_maintain = 64 * 1024 * 1024;
+    columnFamilyOptions.max_write_buffer_size_to_maintain = 0;
     // how many buffers need to merged before write to storage
     columnFamilyOptions.min_write_buffer_number_to_merge = 1;
     // Bloom filter will skip the last level
@@ -78,7 +97,6 @@ int main() {
     // index block size, default 4 kb
     basedTableOptions.block_size = 32  * 1024;
     // block cache which is used on reads
-    auto cache = NewLRUCache(256 * 1024 * 1024);
     basedTableOptions.block_cache = cache;
     // index, filter should be put in cache
     basedTableOptions.cache_index_and_filter_blocks = true;
@@ -96,10 +114,12 @@ int main() {
     // open DB
     std::vector<ColumnFamilyHandle *> handles;
     DB *db;
-    OptimisticTransactionDB *txn_db;
-    Status s = OptimisticTransactionDB::Open(dbOptions, kDBPath, column_families, &handles, &txn_db);
+//    OptimisticTransactionDB *txn_db;
+
+
+    Status s = DB::Open(dbOptions, kDBPath, column_families, &handles, &db);// OptimisticTransactionDB::Open(dbOptions, kDBPath, column_families, &handles, &txn_db);
     assert(s.ok());
-    db = txn_db->GetBaseDB();
+//    db = txn_db->GetBaseDB();
 
     ////////////////////////////////////////////////////////
     //
@@ -116,9 +136,31 @@ int main() {
     auto key = std::string(1024 * 1024, 'a');
     clock_t iterationTime = clock();
     for (int i = 0; i < transactionCount; ++i) {
-        runTransaction(txn_db, iterationTime, key, handles, i);
-    }
 
+        auto newKey = key + std::to_string(i);
+        WriteOptions write_options;
+
+        // Write a key in this transaction
+        ColumnFamilyHandle *&family = handles.at(i % handles.size());
+        s = db->Put(write_options, family, newKey, "abc");
+
+        if (!s.ok())
+        {
+            std::cout << s.ToString() << std::endl;
+        }
+
+
+        if (i % 100 == 0)
+        {
+            const clock_t currentClock = clock();
+            std::cout << "Transaction " << i << " took " << double(currentClock - iterationTime) / CLOCKS_PER_SEC << " secs since last iteration." << std::endl;
+            iterationTime = currentClock;
+        }
+
+//        writeBatch(db, iterationTime, key, handles, i);
+
+//        runTransaction(txn_db, iterationTime, key, handles, i);
+    }
 
     const clock_t endTime = clock();
 
@@ -127,10 +169,55 @@ int main() {
 
     std::cout << " statistics: " << dbOptions.statistics.get()->ToString() << std::endl;
 
+
+    const std::string currMemTableSize = "rocksdb.cur-size-all-mem-tables";
+    const std::string blockCacheUsage = "rocksdb.block-cache-usage";
+
+    for (int i = 0; i < (int) handles.size(); i++) {
+        std::string value;
+        db->GetProperty(handles.at(i), currMemTableSize, &value);
+        std::cout << handles.at(i)->GetName() << " mem " << value << std::endl;
+        db->GetProperty(handles.at(i), blockCacheUsage, &value);
+        std::cout << handles.at(i)->GetName() << " block cache usage " << value << std::endl;
+    }
+
     // Cleanup
-    delete txn_db;
+//    delete txn_db;
+    delete db;
     DestroyDB(kDBPath, Options(), column_families);
     return 0;
+}
+
+void writeBatch(DB* db,
+                clock_t& iterationTime,
+                std::string& key,
+                std::vector<ColumnFamilyHandle *> handles,
+                int i)
+{
+
+    WriteOptions write_options;
+    auto newKey = key + std::to_string(i);
+
+    WriteBatch writeBatch = WriteBatch();
+    // Write a key in this transaction
+    ColumnFamilyHandle *&family = handles.at(i % handles.size());
+
+    Status s = writeBatch.Put(family, newKey, "abc");
+    assert(s.ok());
+
+
+    s = db->Write(write_options, &writeBatch);
+    if (!s.ok())
+    {
+        std::cout << s.ToString() << std::endl;
+    }
+
+    if (i % 100 == 0)
+    {
+        const clock_t currentClock = clock();
+        std::cout << "Transaction " << i << " took " << double(currentClock - iterationTime) / CLOCKS_PER_SEC << " secs since last iteration." << std::endl;
+        iterationTime = currentClock;
+    }
 }
 
 void runTransaction(OptimisticTransactionDB* txn_db,
@@ -144,6 +231,8 @@ void runTransaction(OptimisticTransactionDB* txn_db,
     OptimisticTransactionOptions txn_options;
     std::string value;
 
+//    write_options.disableWAL = true;
+//    write_options.memtable_insert_hint_per_batch = true;
     auto newKey = key + std::to_string(i);
 
     // Start a transaction

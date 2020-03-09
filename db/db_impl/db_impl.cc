@@ -3043,6 +3043,7 @@ void DBImpl::GetApproximateMemTableStats(ColumnFamilyHandle* column_family,
       sv->mem->ApproximateStats(k1.Encode(), k2.Encode());
   MemTable::MemTableStats immStats =
       sv->imm->ApproximateStats(k1.Encode(), k2.Encode());
+
   *count = memStats.count + immStats.count;
   *size = memStats.size + immStats.size;
 
