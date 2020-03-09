@@ -29,24 +29,15 @@ int main() {
     dbOptions.create_if_missing = true;
     dbOptions.create_missing_column_families = true;
 
+    // enable statistics
     dbOptions.statistics = CreateDBStatistics();
     dbOptions.dump_malloc_stats = true;
-
-    // index and bloom filter
-    // table option
-    BlockBasedTableOptions basedTableOptions = BlockBasedTableOptions();
-    basedTableOptions.block_size = 32 * 1024 * 1024;
-    auto cache = NewLRUCache(64 * 1024 * 1024);
-    basedTableOptions.block_cache = cache;
-    basedTableOptions.cache_index_and_filter_blocks = true;
-    basedTableOptions.pin_l0_filter_and_index_blocks_in_cache = true;
 
     // mem table
 //    WriteBufferManager* manager = new WriteBufferManager((2 * 1024  * 1024 * 1023) + 1023, cache);
 //    dbOptions.write_buffer_manager.reset(manager);
 
 
-    // THIS WORKS DEF ->
     // 64 mb def by one column took ~ 30 s
     // 128 mb def by one column took 15
     // 2 gig by 50 column took took 14
@@ -54,17 +45,40 @@ int main() {
     // with larger keys there where no diff?
     dbOptions.db_write_buffer_size = 0; // (2 * 1024  * 1024 * 1023) + 1023;
     // necessary otherwise our benchmark fails
+    // maximum open files in this database
     dbOptions.max_open_files = 512;
 
-    const int columnFamilyCount = 50;
+    const int columnFamilyCount = 0;
     ColumnFamilyOptions columnFamilyOptions = ColumnFamilyOptions();
-    columnFamilyOptions.max_write_buffer_number = 1;
-    columnFamilyOptions.write_buffer_size = 32 * 1024 * 1024;
 
-    columnFamilyOptions.max_write_buffer_size_to_maintain = 0;
+    // maximum write buffers, before flushing to disk
+    columnFamilyOptions.max_write_buffer_number = 1;
+    // memtable size per column family
+    columnFamilyOptions.write_buffer_size = 32 * 1024 * 1024;
+    // maximum maintained bytes, incl buffers which are already flushed
+    columnFamilyOptions.max_write_buffer_size_to_maintain = 64 * 1024 * 1024;
+    // how many buffers need to merged before write to storage
     columnFamilyOptions.min_write_buffer_number_to_merge = 0;
-//    columnFamilyOptions.optimize_filters_for_hits = true;
-//    columnFamilyOptions.table_factory.reset(NewBlockBasedTableFactory(basedTableOptions));
+    // Bloom filter will skip the last level
+    // makes sense since know normally the key
+    columnFamilyOptions.optimize_filters_for_hits = true;
+
+    // index and bloom filter
+    // table option
+    BlockBasedTableOptions basedTableOptions = BlockBasedTableOptions();
+    // index block size, default 4 kb
+    basedTableOptions.block_size = 32  * 1024;
+    // block cache which is used on reads
+    auto cache = NewLRUCache(64 * 1024 * 1024);
+    basedTableOptions.block_cache = cache;
+    // index, filter should be put in cache
+    basedTableOptions.cache_index_and_filter_blocks = true;
+    // directly link level 0 in cache
+    basedTableOptions.pin_l0_filter_and_index_blocks_in_cache = true;
+
+    // sets index, filter and cache cfg in column setting
+    columnFamilyOptions.table_factory.reset(NewBlockBasedTableFactory(basedTableOptions));
+//    columnFamilyOptions.arena_block_size = 128 * 1024 * 1024;
 
     std::vector<ColumnFamilyDescriptor> column_families;
     createColumnFamilies(columnFamilyCount, columnFamilyOptions, column_families);
