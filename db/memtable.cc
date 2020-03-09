@@ -13,6 +13,7 @@
 #include <array>
 #include <limits>
 #include <memory>
+#include <iostream>
 #include "db/dbformat.h"
 #include "db/merge_context.h"
 #include "db/merge_helper.h"
@@ -161,6 +162,7 @@ bool MemTable::ShouldFlushNow() {
                           range_del_table_->ApproximateMemoryUsage() +
                           arena_.MemoryAllocatedBytes();
 
+//  std::cout << "Allocated mem: " << allocated_memory << std::endl;
   approximate_memory_usage_.store(allocated_memory, std::memory_order_relaxed);
 
   // if we can still allocate one more block without exceeding the
