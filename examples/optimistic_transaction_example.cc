@@ -37,6 +37,9 @@ void writeBatch(DB* db,
                 std::vector<ColumnFamilyHandle *> handles,
                 int i);
 
+
+void printProperty(DB* db, ColumnFamilyHandle *&pColumnFamilyHandle, const std::string &property);
+
 int main() {
 
     DBOptions dbOptions;
@@ -114,12 +117,8 @@ int main() {
     // open DB
     std::vector<ColumnFamilyHandle *> handles;
     DB *db;
-//    OptimisticTransactionDB *txn_db;
-
-
     Status s = DB::Open(dbOptions, kDBPath, column_families, &handles, &db);// OptimisticTransactionDB::Open(dbOptions, kDBPath, column_families, &handles, &txn_db);
     assert(s.ok());
-//    db = txn_db->GetBaseDB();
 
     ////////////////////////////////////////////////////////
     //
@@ -156,10 +155,6 @@ int main() {
             std::cout << "Transaction " << i << " took " << double(currentClock - iterationTime) / CLOCKS_PER_SEC << " secs since last iteration." << std::endl;
             iterationTime = currentClock;
         }
-
-//        writeBatch(db, iterationTime, key, handles, i);
-
-//        runTransaction(txn_db, iterationTime, key, handles, i);
     }
 
     const clock_t endTime = clock();
@@ -173,12 +168,21 @@ int main() {
     const std::string currMemTableSize = "rocksdb.cur-size-all-mem-tables";
     const std::string blockCacheUsage = "rocksdb.block-cache-usage";
 
+
+
     for (int i = 0; i < (int) handles.size(); i++) {
         std::string value;
-        db->GetProperty(handles.at(i), currMemTableSize, &value);
-        std::cout << handles.at(i)->GetName() << " mem " << value << std::endl;
-        db->GetProperty(handles.at(i), blockCacheUsage, &value);
-        std::cout << handles.at(i)->GetName() << " block cache usage " << value << std::endl;
+        ColumnFamilyHandle *&pColumnFamilyHandle = handles.at(i);
+        std::cout << "ColumnFamily: " << pColumnFamilyHandle->GetName() << std::endl;
+
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeAllMemTables);
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeActiveMemTable);
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kSizeAllMemTables);
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kBlockCacheUsage);
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kBlockCacheCapacity);
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kBlockCachePinnedUsage);
+        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kEstimateNumKeys);
+//        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kSSTables);
     }
 
     // Cleanup
@@ -186,6 +190,12 @@ int main() {
     delete db;
     DestroyDB(kDBPath, Options(), column_families);
     return 0;
+}
+
+void printProperty(DB* db, ColumnFamilyHandle *&pColumnFamilyHandle, const std::string &property) {
+    std::string value;
+    db->GetProperty(pColumnFamilyHandle, property, &value);
+    std::cout << property << ": " << value << std::endl;
 }
 
 void writeBatch(DB* db,
