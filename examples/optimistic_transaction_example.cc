@@ -53,63 +53,49 @@ int main() {
 
     // mem table
 
+    // calculation reused from flink
     const double writeBufferRatio = 0.5;
-    const uint64_t totalSize = (uint64_t) (4 * 1024 * 1024) * 1024;
+    const uint64_t totalSize = (uint64_t) (2 * 1024 * 1024) * 1024;
     const double highRatio = 0.1;
 
     const double cacheSize = ((3 - writeBufferRatio) * totalSize) / 3.0f;
     const double writeBufferSize = 2 * totalSize * writeBufferRatio / 3.0f;
 
-//    dbOptions.db_write_buffer_size = (1 * 1024  * 1024 * 1023) + 1023;
-
-
     std::cout << "Cache size: " << cacheSize << " write buffer size: " << writeBufferSize << std::endl;
     auto cache = NewLRUCache(cacheSize, -1, false, highRatio);
-    WriteBufferManager* manager = new WriteBufferManager(writeBufferSize, cache);
+    // manager supervise write buffer size
+    auto* manager = new WriteBufferManager(writeBufferSize, cache);
     dbOptions.write_buffer_manager.reset(manager);
 
-    // 64 mb def by one column took ~ 30 s
-    // 128 mb def by one column took 15
-    // 2 gig by 50 column took took 14
-    // these numbers above with small keys 32 kb
-    // with larger keys there where no diff?
-//    dbOptions.db_write_buffer_size = (1 * 1024  * 1024 * 1023) + 1023;
-    // necessary otherwise our benchmark fails
-    // maximum open files in this database
-    dbOptions.max_open_files = 512;
+    dbOptions.create_if_missing = true;
+    dbOptions.statistics = CreateDBStatistics();
+    dbOptions.max_open_files = 100;
 
     const int columnFamilyCount = 50;
     ColumnFamilyOptions columnFamilyOptions = ColumnFamilyOptions();
 
-    // maximum write buffers, before flushing to disk
-    columnFamilyOptions.max_write_buffer_number = 1;
-    // memtable size per column family
-    columnFamilyOptions.write_buffer_size = 32 * 1024 * 1024;
-    // maximum maintained bytes, incl buffers which are already flushed
-    columnFamilyOptions.max_write_buffer_size_to_maintain = 0;
-    // how many buffers need to merged before write to storage
-    columnFamilyOptions.min_write_buffer_number_to_merge = 1;
-    // Bloom filter will skip the last level
-    // makes sense since know normally the key
-    columnFamilyOptions.optimize_filters_for_hits = true;
-    columnFamilyOptions.arena_block_size = 4096;
+    // RSS will increase if we have more files on disk
+    columnFamilyOptions.write_buffer_size = 8 * 1024 * 1024;
+    columnFamilyOptions.max_write_buffer_number = 8;
+//    columnFamilyOptions.min_write_buffer_number_to_merge = 1;
+
+    columnFamilyOptions.arena_block_size = 4 * 1024;
+//    columnFamilyOptions.optimize_filters_for_hits = true;
+//    columnFamilyOptions.target_file_size_base = 256 * 1024 * 1024;
 
     // index and bloom filter
     // table option
     BlockBasedTableOptions basedTableOptions = BlockBasedTableOptions();
-    // index block size, default 4 kb
+
     basedTableOptions.block_size = 32  * 1024;
-    // block cache which is used on reads
     basedTableOptions.block_cache = cache;
-    // index, filter should be put in cache
     basedTableOptions.cache_index_and_filter_blocks = true;
     basedTableOptions.cache_index_and_filter_blocks_with_high_priority = false;
     // directly link level 0 in cache
-    basedTableOptions.pin_l0_filter_and_index_blocks_in_cache = true;
+    basedTableOptions.pin_l0_filter_and_index_blocks_in_cache = false;
 
     // sets index, filter and cache cfg in column setting
     columnFamilyOptions.table_factory.reset(NewBlockBasedTableFactory(basedTableOptions));
-//    columnFamilyOptions.arena_block_size = 128 * 1024 * 1024;
 
     std::vector<ColumnFamilyDescriptor> column_families;
     createColumnFamilies(columnFamilyCount, columnFamilyOptions, column_families);
@@ -169,11 +155,25 @@ int main() {
     const std::string blockCacheUsage = "rocksdb.block-cache-usage";
 
 
+    int totalCurSizeAllMemTables = 0;
+    int totalCurSizeActiveMemTable = 0;
+    int totalSizeAllMemTables = 0;
 
     for (int i = 0; i < (int) handles.size(); i++) {
-        std::string value;
         ColumnFamilyHandle *&pColumnFamilyHandle = handles.at(i);
         std::cout << "ColumnFamily: " << pColumnFamilyHandle->GetName() << std::endl;
+
+
+        std::string value;
+        db->GetProperty(pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeAllMemTables, &value);
+        totalCurSizeAllMemTables += std::stoi(value);
+
+        db->GetProperty(pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeActiveMemTable, &value);
+        totalCurSizeActiveMemTable += std::stoi(value);
+
+        db->GetProperty(pColumnFamilyHandle, rocksdb::DB::Properties::kSizeAllMemTables, &value);
+        totalSizeAllMemTables += std::stoi(value);
+
 
         printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeAllMemTables);
         printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeActiveMemTable);
@@ -184,6 +184,12 @@ int main() {
         printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kEstimateNumKeys);
 //        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kSSTables);
     }
+
+    std::cout << "totalCurSizeAllMemTables: " << ((totalCurSizeAllMemTables / 1024.0f) / 1024.0f) << " MB" << std::endl;
+    std::cout << "totalCurSizeActiveMemTable: " << ((totalCurSizeActiveMemTable / 1024.0f) / 1024.0f) << " MB" << std::endl;
+    std::cout << "totalSizeAllMemTables: " << ((totalSizeAllMemTables / 1024.0f) / 1024.0f) << " MB" << std::endl;
+    printProperty(db, handles.at(0), rocksdb::DB::Properties::kBlockCacheUsage);
+    std::cout << "Expected total size: " << totalSize << std::endl;
 
     // Cleanup
 //    delete txn_db;
