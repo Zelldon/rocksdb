@@ -40,11 +40,15 @@ void writeBatch(DB* db,
 
 void printProperty(DB* db, ColumnFamilyHandle *&pColumnFamilyHandle, const std::string &property);
 
+void printColumnFamilyStats(std::vector<ColumnFamilyHandle *> &handles, DB *db, int &totalCurSizeAllMemTables,
+                            int &totalCurSizeActiveMemTable, int &totalSizeAllMemTables);
+
 int main() {
 
     DBOptions dbOptions;
     dbOptions.create_if_missing = true;
     dbOptions.create_missing_column_families = true;
+
 
     // enable statistics
     dbOptions.statistics = CreateDBStatistics();
@@ -62,7 +66,7 @@ int main() {
     const double writeBufferSize = 2 * totalSize * writeBufferRatio / 3.0f;
 
     std::cout << "Cache size: " << cacheSize << " write buffer size: " << writeBufferSize << std::endl;
-    auto cache = NewLRUCache(cacheSize, -1, false, highRatio);
+    auto cache = NewLRUCache(cacheSize, -1, true, highRatio);
     // manager supervise write buffer size
     auto* manager = new WriteBufferManager(writeBufferSize, cache);
     dbOptions.write_buffer_manager.reset(manager);
@@ -71,12 +75,15 @@ int main() {
     dbOptions.statistics = CreateDBStatistics();
     dbOptions.max_open_files = 100;
 
+    dbOptions.paranoid_checks
+
     const int columnFamilyCount = 50;
     ColumnFamilyOptions columnFamilyOptions = ColumnFamilyOptions();
 
     // RSS will increase if we have more files on disk
     columnFamilyOptions.write_buffer_size = 8 * 1024 * 1024;
-    columnFamilyOptions.max_write_buffer_number = 8;
+    columnFamilyOptions.max_write_buffer_number = 2;
+
 //    columnFamilyOptions.min_write_buffer_number_to_merge = 1;
 
     columnFamilyOptions.arena_block_size = 4 * 1024;
@@ -89,7 +96,7 @@ int main() {
 
     basedTableOptions.block_size = 32  * 1024;
     basedTableOptions.block_cache = cache;
-    basedTableOptions.cache_index_and_filter_blocks = true;
+    basedTableOptions.cache_index_and_filter_blocks = false;
     basedTableOptions.cache_index_and_filter_blocks_with_high_priority = false;
     // directly link level 0 in cache
     basedTableOptions.pin_l0_filter_and_index_blocks_in_cache = false;
@@ -103,7 +110,8 @@ int main() {
     // open DB
     std::vector<ColumnFamilyHandle *> handles;
     DB *db;
-    Status s = DB::Open(dbOptions, kDBPath, column_families, &handles, &db);// OptimisticTransactionDB::Open(dbOptions, kDBPath, column_families, &handles, &txn_db);
+    Status s = DB::Open(dbOptions, kDBPath, column_families, &handles, &db);
+    // OptimisticTransactionDB::Open(dbOptions, kDBPath, column_families, &handles, &txn_db);
     assert(s.ok());
 
     ////////////////////////////////////////////////////////
@@ -111,14 +119,14 @@ int main() {
     // Benchmark
     //
     ////////////////////////////////////////////////////////
-    const int transactionCount = 10000;
+    const int transactionCount = 1000 * 32;
 
-    std::cout << "~ Start Benchmark ~" << std::endl;
+    std::cout << "~ Start Benchmark ~" << db->GetName() << std::endl;
     std::cout << "Column family count: " << columnFamilyCount << std::endl;
     std::cout << "Transaction count: " << transactionCount << std::endl;
 
     const clock_t startTime = clock();
-    auto key = std::string(1024 * 1024, 'a');
+    auto key = std::string(32 * 1024, 'a');
     clock_t iterationTime = clock();
     for (int i = 0; i < transactionCount; ++i) {
 
@@ -140,7 +148,21 @@ int main() {
             const clock_t currentClock = clock();
             std::cout << "Transaction " << i << " took " << double(currentClock - iterationTime) / CLOCKS_PER_SEC << " secs since last iteration." << std::endl;
             iterationTime = currentClock;
+
         }
+
+//        if (i % 1000)
+//        {
+//            int totalCurSizeAllMemTables = 0;
+//            int totalCurSizeActiveMemTable = 0;
+//            int totalSizeAllMemTables = 0;
+//
+//            printColumnFamilyStats(handles, db, totalCurSizeAllMemTables, totalCurSizeActiveMemTable, totalSizeAllMemTables);
+//
+//            std::cout << "totalCurSizeAllMemTables: " << ((totalCurSizeAllMemTables / 1024.0f) / 1024.0f) << " MB" << std::endl;
+//            std::cout << "totalCurSizeActiveMemTable: " << ((totalCurSizeActiveMemTable / 1024.0f) / 1024.0f) << " MB" << std::endl;
+//            std::cout << "totalSizeAllMemTables: " << ((totalSizeAllMemTables / 1024.0f) / 1024.0f) << " MB" << std::endl;
+//        }
     }
 
     const clock_t endTime = clock();
@@ -148,7 +170,7 @@ int main() {
     std::cout << "~ Finished OptimisticDB benchmark ~" << std::endl;
     std::cout << " Benchmark took: " << double(endTime - startTime) / CLOCKS_PER_SEC << " sec" << std::endl;
 
-    std::cout << " statistics: " << dbOptions.statistics.get()->ToString() << std::endl;
+//    std::cout << " statistics: " << dbOptions.statistics.get()->ToString() << std::endl;
 
 
     const std::string currMemTableSize = "rocksdb.cur-size-all-mem-tables";
@@ -159,43 +181,54 @@ int main() {
     int totalCurSizeActiveMemTable = 0;
     int totalSizeAllMemTables = 0;
 
-    for (int i = 0; i < (int) handles.size(); i++) {
-        ColumnFamilyHandle *&pColumnFamilyHandle = handles.at(i);
-        std::cout << "ColumnFamily: " << pColumnFamilyHandle->GetName() << std::endl;
-
-
-        std::string value;
-        db->GetProperty(pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeAllMemTables, &value);
-        totalCurSizeAllMemTables += std::stoi(value);
-
-        db->GetProperty(pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeActiveMemTable, &value);
-        totalCurSizeActiveMemTable += std::stoi(value);
-
-        db->GetProperty(pColumnFamilyHandle, rocksdb::DB::Properties::kSizeAllMemTables, &value);
-        totalSizeAllMemTables += std::stoi(value);
-
-
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeAllMemTables);
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kCurSizeActiveMemTable);
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kSizeAllMemTables);
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kBlockCacheUsage);
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kBlockCacheCapacity);
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kBlockCachePinnedUsage);
-        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kEstimateNumKeys);
-//        printProperty(db, pColumnFamilyHandle, rocksdb::DB::Properties::kSSTables);
-    }
+    printColumnFamilyStats(handles, db, totalCurSizeAllMemTables, totalCurSizeActiveMemTable, totalSizeAllMemTables);
 
     std::cout << "totalCurSizeAllMemTables: " << ((totalCurSizeAllMemTables / 1024.0f) / 1024.0f) << " MB" << std::endl;
     std::cout << "totalCurSizeActiveMemTable: " << ((totalCurSizeActiveMemTable / 1024.0f) / 1024.0f) << " MB" << std::endl;
     std::cout << "totalSizeAllMemTables: " << ((totalSizeAllMemTables / 1024.0f) / 1024.0f) << " MB" << std::endl;
     printProperty(db, handles.at(0), rocksdb::DB::Properties::kBlockCacheUsage);
+    printProperty(db, handles.at(0), rocksdb::DB::Properties::kBlockCachePinnedUsage);
     std::cout << "Expected total size: " << totalSize << std::endl;
+
+
+    printProperty(db, handles.at(0), rocksdb::DB::Properties::kEstimateTableReadersMem);
+
 
     // Cleanup
 //    delete txn_db;
     delete db;
     DestroyDB(kDBPath, Options(), column_families);
     return 0;
+}
+
+void printColumnFamilyStats(std::vector<ColumnFamilyHandle *> &handles, DB *db, int &totalCurSizeAllMemTables,
+                            int &totalCurSizeActiveMemTable, int &totalSizeAllMemTables) {
+    for (int i = 0; i < (int) handles.size(); i++) {
+        ColumnFamilyHandle *&pColumnFamilyHandle = handles.at(i);
+        std::cout << "ColumnFamily: " << pColumnFamilyHandle->GetName() << std::endl;
+
+
+        std::string value;
+        db->GetProperty(pColumnFamilyHandle, DB::Properties::kCurSizeAllMemTables, &value);
+        totalCurSizeAllMemTables += std::stoi(value);
+
+        db->GetProperty(pColumnFamilyHandle, DB::Properties::kCurSizeActiveMemTable, &value);
+        totalCurSizeActiveMemTable += std::stoi(value);
+
+        db->GetProperty(pColumnFamilyHandle, DB::Properties::kSizeAllMemTables, &value);
+        totalSizeAllMemTables += std::stoi(value);
+
+
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kCurSizeAllMemTables);
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kCurSizeActiveMemTable);
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kSizeAllMemTables);
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kBlockCacheUsage);
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kBlockCacheCapacity);
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kBlockCachePinnedUsage);
+        printProperty(db, pColumnFamilyHandle, DB::Properties::kEstimateNumKeys);
+
+        printProperty(db, handles.at(0), DB::Properties::kEstimateTableReadersMem);
+    }
 }
 
 void printProperty(DB* db, ColumnFamilyHandle *&pColumnFamilyHandle, const std::string &property) {
